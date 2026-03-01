@@ -537,9 +537,20 @@ impl ChannelService for LiveChannelService {
             channel_type = channel_type.as_str(),
             "updating channel account"
         );
-        self.stop_plugin_account(channel_type, account_id).await?;
-        self.start_plugin_account(channel_type, account_id, config.clone())
-            .await?;
+        match channel_type {
+            ChannelType::Whatsapp => {
+                // WhatsApp keeps a persistent sled DB lock while running; for
+                // policy/config-only changes, apply hot updates in-place to
+                // avoid stop/start lock races.
+                self.hot_update_config(channel_type, account_id, config.clone())
+                    .await;
+            },
+            _ => {
+                self.stop_plugin_account(channel_type, account_id).await?;
+                self.start_plugin_account(channel_type, account_id, config.clone())
+                    .await?;
+            },
+        }
 
         let created_at = self
             .store
