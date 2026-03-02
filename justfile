@@ -2,17 +2,24 @@
 default:
     @just --list
 
+# Keep local formatting/linting toolchain aligned with CI/release workflows.
+nightly_toolchain := "nightly-2025-11-30"
+
 # Format Rust code
 format:
-    cargo +nightly fmt --all
+    cargo +{{nightly_toolchain}} fmt --all
 
 # Check if code is formatted
 format-check:
-    cargo +nightly fmt -- --check
+    cargo +{{nightly_toolchain}} fmt --all -- --check
+
+# Verify Cargo.lock is in sync with workspace manifests.
+lockfile-check:
+    cargo fetch --locked
 
 # Lint Rust code using clippy
-lint:
-    cargo clippy --bins --tests --benches --examples --all-features --all-targets -- -D warnings
+lint: lockfile-check
+    cargo +{{nightly_toolchain}} clippy -Z unstable-options --workspace --all-features --all-targets --timings -- -D warnings
 
 # Build the project
 build:
@@ -21,3 +28,278 @@ build:
 # Build in release mode
 build-release:
     cargo build --release
+
+# Build embedded WASM guest tools for component execution.
+wasm-tools:
+    cargo build --target wasm32-wasip2 -p moltis-wasm-calc -p moltis-wasm-web-fetch -p moltis-wasm-web-search --release
+
+# Run local dev server with workspace-local config/data dirs.
+dev-server:
+    MOLTIS_CONFIG_DIR=.moltis/config MOLTIS_DATA_DIR=.moltis/ cargo run --bin moltis
+
+# Build Debian package for the current architecture
+deb: build-release
+    cargo deb -p moltis --no-build
+
+# Build Debian package for amd64
+deb-amd64:
+    cargo build --release --target x86_64-unknown-linux-gnu
+    cargo deb -p moltis --no-build --target x86_64-unknown-linux-gnu
+
+# Build Debian package for arm64
+deb-arm64:
+    cargo build --release --target aarch64-unknown-linux-gnu
+    cargo deb -p moltis --no-build --target aarch64-unknown-linux-gnu
+
+# Build Debian packages for all architectures
+deb-all: deb-amd64 deb-arm64
+
+# Build Arch package for the current architecture
+arch-pkg: build-release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    ARCH=$(uname -m)
+    PKG_DIR="target/arch-pkg"
+    rm -rf "$PKG_DIR"
+    mkdir -p "$PKG_DIR/usr/bin"
+    cp target/release/moltis "$PKG_DIR/usr/bin/moltis"
+    chmod 755 "$PKG_DIR/usr/bin/moltis"
+    cat > "$PKG_DIR/.PKGINFO" <<PKGINFO
+    pkgname = moltis
+    pkgver = ${VERSION}-1
+    pkgdesc = Personal AI gateway inspired by OpenClaw
+    url = https://www.moltis.org/
+    arch = ${ARCH}
+    license = MIT
+    PKGINFO
+    cd "$PKG_DIR"
+    fakeroot -- tar --zstd -cf "../../moltis-${VERSION}-1-${ARCH}.pkg.tar.zst" .PKGINFO usr/
+    echo "Built moltis-${VERSION}-1-${ARCH}.pkg.tar.zst"
+
+# Build Arch package for x86_64
+arch-pkg-x86_64:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release --target x86_64-unknown-linux-gnu
+    VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    PKG_DIR="target/arch-pkg-x86_64"
+    rm -rf "$PKG_DIR"
+    mkdir -p "$PKG_DIR/usr/bin"
+    cp target/x86_64-unknown-linux-gnu/release/moltis "$PKG_DIR/usr/bin/moltis"
+    chmod 755 "$PKG_DIR/usr/bin/moltis"
+    cat > "$PKG_DIR/.PKGINFO" <<PKGINFO
+    pkgname = moltis
+    pkgver = ${VERSION}-1
+    pkgdesc = Personal AI gateway inspired by OpenClaw
+    url = https://www.moltis.org/
+    arch = x86_64
+    license = MIT
+    PKGINFO
+    cd "$PKG_DIR"
+    fakeroot -- tar --zstd -cf "../../moltis-${VERSION}-1-x86_64.pkg.tar.zst" .PKGINFO usr/
+    echo "Built moltis-${VERSION}-1-x86_64.pkg.tar.zst"
+
+# Build Arch package for aarch64
+arch-pkg-aarch64:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release --target aarch64-unknown-linux-gnu
+    VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    PKG_DIR="target/arch-pkg-aarch64"
+    rm -rf "$PKG_DIR"
+    mkdir -p "$PKG_DIR/usr/bin"
+    cp target/aarch64-unknown-linux-gnu/release/moltis "$PKG_DIR/usr/bin/moltis"
+    chmod 755 "$PKG_DIR/usr/bin/moltis"
+    cat > "$PKG_DIR/.PKGINFO" <<PKGINFO
+    pkgname = moltis
+    pkgver = ${VERSION}-1
+    pkgdesc = Personal AI gateway inspired by OpenClaw
+    url = https://www.moltis.org/
+    arch = aarch64
+    license = MIT
+    PKGINFO
+    cd "$PKG_DIR"
+    fakeroot -- tar --zstd -cf "../../moltis-${VERSION}-1-aarch64.pkg.tar.zst" .PKGINFO usr/
+    echo "Built moltis-${VERSION}-1-aarch64.pkg.tar.zst"
+
+# Build Arch packages for all architectures
+arch-pkg-all: arch-pkg-x86_64 arch-pkg-aarch64
+
+# Build RPM package for the current architecture
+rpm: build-release
+    cargo generate-rpm -p crates/cli
+
+# Build RPM package for x86_64
+rpm-x86_64:
+    cargo build --release --target x86_64-unknown-linux-gnu
+    cargo generate-rpm -p crates/cli --target x86_64-unknown-linux-gnu
+
+# Build RPM package for aarch64
+rpm-aarch64:
+    cargo build --release --target aarch64-unknown-linux-gnu
+    cargo generate-rpm -p crates/cli --target aarch64-unknown-linux-gnu
+
+# Build RPM packages for all architectures
+rpm-all: rpm-x86_64 rpm-aarch64
+
+# Build AppImage for the current architecture
+appimage: build-release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    ARCH=$(uname -m)
+    APP_DIR="target/moltis.AppDir"
+    rm -rf "$APP_DIR"
+    mkdir -p "$APP_DIR/usr/bin"
+    cp target/release/moltis "$APP_DIR/usr/bin/moltis"
+    chmod 755 "$APP_DIR/usr/bin/moltis"
+    cat > "$APP_DIR/moltis.desktop" <<DESKTOP
+    [Desktop Entry]
+    Type=Application
+    Name=Moltis
+    Exec=moltis
+    Icon=moltis
+    Categories=Network;
+    Terminal=true
+    DESKTOP
+    cat > "$APP_DIR/moltis.svg" <<SVG
+    <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="#333"/><text x="128" y="140" font-size="120" text-anchor="middle" fill="white">M</text></svg>
+    SVG
+    ln -sf moltis.svg "$APP_DIR/.DirIcon"
+    cat > "$APP_DIR/AppRun" <<'APPRUN'
+    #!/bin/sh
+    SELF=$(readlink -f "$0")
+    HERE=${SELF%/*}
+    exec "$HERE/usr/bin/moltis" "$@"
+    APPRUN
+    chmod +x "$APP_DIR/AppRun"
+    if [ ! -f target/appimagetool ]; then
+        wget -q "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${ARCH}.AppImage" -O target/appimagetool
+        chmod +x target/appimagetool
+    fi
+    ARCH=${ARCH} target/appimagetool --appimage-extract-and-run "$APP_DIR" "moltis-${VERSION}-${ARCH}.AppImage"
+    echo "Built moltis-${VERSION}-${ARCH}.AppImage"
+
+# Build Snap package
+snap:
+    snapcraft
+
+# Build Flatpak
+flatpak:
+    cd flatpak && flatpak-builder --repo=repo --force-clean builddir org.moltbot.Moltis.yml
+
+# Run all CI checks (format, lint, build, test)
+ci: format-check lint i18n-check build test
+
+# Run the same Rust preflight gates used before release packaging.
+release-preflight: lockfile-check
+    cargo +{{nightly_toolchain}} fmt --all -- --check
+    cargo +{{nightly_toolchain}} clippy -Z unstable-options --workspace --all-features --all-targets --timings -- -D warnings
+
+# Regenerate CHANGELOG.md from git history and tags.
+changelog:
+    git-cliff --config cliff.toml --output CHANGELOG.md
+
+# Preview unreleased changelog entries from commits since the last tag.
+changelog-unreleased:
+    git-cliff --config cliff.toml --unreleased
+
+# Generate release entries for unreleased commits under the provided version.
+changelog-release version:
+    git-cliff --config cliff.toml --unreleased --tag "v{{version}}" --strip all
+
+# Commit all changes, push branch, create/update PR, and run local validation.
+# All args are optional; defaults are auto-generated from branch + changed files.
+ship commit_message='' pr_title='' pr_body='':
+    ./scripts/ship-pr.sh {{ quote(commit_message) }} {{ quote(pr_title) }} {{ quote(pr_body) }}
+
+# Run all tests
+test:
+    cargo nextest run --all-features
+
+# Verify locale key parity across frontend i18n bundles.
+i18n-check:
+    ./scripts/i18n-check.sh
+
+# Install browser tooling for gateway web UI e2e tests.
+ui-e2e-install:
+    cd crates/web/ui && npm install && npm run e2e:install
+
+# Run gateway web UI e2e tests (Playwright).
+ui-e2e:
+    cargo build --bin moltis
+    cd crates/web/ui && npm run e2e
+
+# Run gateway web UI e2e tests with headed browser.
+ui-e2e-headed:
+    cargo build --bin moltis
+    cd crates/web/ui && npm run e2e:headed
+
+# Build all Linux packages (deb + rpm + arch + appimage) for all architectures
+packages-all: deb-all rpm-all arch-pkg-all
+
+# Build Rust static library and generated C header for the macOS app.
+swift-build-rust:
+    ./scripts/build-swift-bridge.sh
+
+# Generate Xcode project from YAML spec in apps/macos.
+swift-generate:
+    ./scripts/generate-swift-project.sh
+
+# Lint macOS app sources with SwiftLint.
+swift-lint:
+    ./scripts/lint-swift.sh
+
+# Build Swift macOS app.
+swift-build: swift-build-rust swift-generate
+    ./scripts/build-swift.sh
+
+# Run Swift app unit tests.
+swift-test: swift-build-rust swift-generate
+    ./scripts/test-swift.sh
+
+# Build and launch the Swift macOS app locally.
+swift-run: swift-build-rust swift-generate
+    ./scripts/run-swift.sh
+
+# Open generated project in Xcode.
+swift-open: swift-build-rust swift-generate
+    open apps/macos/Moltis.xcodeproj
+
+# Generate iOS app Xcode project.
+ios-generate:
+    ./scripts/generate-ios-project.sh
+
+# Generate Apollo GraphQL types for iOS.
+ios-graphql:
+    cargo run -p moltis-schema-export -- apps/ios/GraphQL/Schema/schema.graphqls
+    ./scripts/generate-ios-graphql.sh
+
+# Build iOS app (generic iOS destination, no signing).
+ios-build: ios-graphql ios-generate
+    xcodebuild -project apps/ios/Moltis.xcodeproj -scheme Moltis -configuration Debug -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO build
+
+# Lint iOS app sources with SwiftLint.
+ios-lint:
+    cd apps/ios && swiftlint
+
+# Open iOS project in Xcode (regenerates GraphQL types and project first).
+ios-open: ios-graphql ios-generate
+    open apps/ios/Moltis.xcodeproj
+
+# Build the APNS push relay.
+courier-build:
+    cargo build -p moltis-courier --release
+
+# Cross-compile courier for linux/x86_64.
+courier-cross:
+    cargo build -p moltis-courier --release --target x86_64-unknown-linux-gnu
+
+# Deploy courier to remote server(s) via Ansible.
+courier-deploy:
+    cd apps/courier/deploy && ansible-playbook playbook.yml
+
+# Run the APNS push relay (dev).
+courier-run *ARGS:
+    cargo run -p moltis-courier -- {{ARGS}}

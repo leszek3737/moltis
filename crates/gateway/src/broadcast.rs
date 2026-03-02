@@ -1,8 +1,9 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use moltis_protocol::{scopes, EventFrame, StateVersion};
-use tracing::{debug, warn};
+use {
+    moltis_protocol::{EventFrame, StateVersion, scopes},
+    tracing::{debug, warn},
+};
 
 use crate::state::GatewayState;
 
@@ -11,30 +12,12 @@ use crate::state::GatewayState;
 /// Events that require specific scopes to receive.
 fn event_scope_guards() -> HashMap<&'static str, &'static [&'static str]> {
     let mut m = HashMap::new();
-    m.insert(
-        "exec.approval.requested",
-        [scopes::APPROVALS].as_slice(),
-    );
-    m.insert(
-        "exec.approval.resolved",
-        [scopes::APPROVALS].as_slice(),
-    );
-    m.insert(
-        "device.pair.requested",
-        [scopes::PAIRING].as_slice(),
-    );
-    m.insert(
-        "device.pair.resolved",
-        [scopes::PAIRING].as_slice(),
-    );
-    m.insert(
-        "node.pair.requested",
-        [scopes::PAIRING].as_slice(),
-    );
-    m.insert(
-        "node.pair.resolved",
-        [scopes::PAIRING].as_slice(),
-    );
+    m.insert("exec.approval.requested", [scopes::APPROVALS].as_slice());
+    m.insert("exec.approval.resolved", [scopes::APPROVALS].as_slice());
+    m.insert("device.pair.requested", [scopes::PAIRING].as_slice());
+    m.insert("device.pair.resolved", [scopes::PAIRING].as_slice());
+    m.insert("node.pair.requested", [scopes::PAIRING].as_slice());
+    m.insert("node.pair.resolved", [scopes::PAIRING].as_slice());
     m
 }
 
@@ -44,8 +27,13 @@ fn event_scope_guards() -> HashMap<&'static str, &'static [&'static str]> {
 pub struct BroadcastOpts {
     pub drop_if_slow: bool,
     pub state_version: Option<StateVersion>,
+    /// Stream group ID for chunked delivery (v4).
+    pub stream: Option<String>,
+    /// End-of-stream marker (v4).
+    pub done: bool,
+    /// Logical channel for multiplexing (v4).
+    pub channel: Option<String>,
 }
-
 
 // ── Broadcaster ──────────────────────────────────────────────────────────────
 
@@ -58,27 +46,46 @@ pub async fn broadcast(
     opts: BroadcastOpts,
 ) {
     let seq = state.next_seq();
+    let stream = opts.stream.clone();
+    let done = opts.done.then_some(true);
+    let channel = opts.channel.clone();
     let frame = EventFrame {
         r#type: "event".into(),
         event: event.into(),
         payload: Some(payload),
         seq: Some(seq),
         state_version: opts.state_version,
+        stream,
+        done,
+        channel,
     };
     let json = match serde_json::to_string(&frame) {
         Ok(j) => j,
         Err(e) => {
             warn!("failed to serialize broadcast event: {e}");
             return;
-        }
+        },
     };
+
+    // Forward to GraphQL subscription broadcast channel.
+    #[cfg(feature = "graphql")]
+    if let Some(ref payload) = frame.payload {
+        let _ = state
+            .graphql_broadcast
+            .send((event.to_string(), payload.clone()));
+    }
 
     let guards = event_scope_guards();
     let required_scopes = guards.get(event);
 
-    let clients = state.clients.read().await;
-    debug!(event, seq, clients = clients.len(), "broadcasting event");
-    for client in clients.values() {
+    let inner = state.inner.read().await;
+    debug!(
+        event,
+        seq,
+        clients = inner.clients.len(),
+        "broadcasting event"
+    );
+    for client in inner.clients.values() {
         // Check scope guard: if the event requires a scope, verify the client has it.
         if let Some(required) = required_scopes {
             let client_scopes = client.scopes();
@@ -89,6 +96,19 @@ pub async fn broadcast(
             }
         }
 
+        // Subscription filter (v4): skip clients not subscribed to this event.
+        if !client.is_subscribed_to(event) {
+            continue;
+        }
+
+        // Channel filter (v4): if event is scoped to a channel, skip clients
+        // that haven't joined it.
+        if let Some(ref ch) = opts.channel
+            && !client.is_in_channel(ch)
+        {
+            continue;
+        }
+
         if !client.send(&json) && opts.drop_if_slow {
             // Channel full or closed — skip silently when drop_if_slow.
             continue;
@@ -96,8 +116,13 @@ pub async fn broadcast(
     }
 }
 
-/// Broadcast a tick event with the current timestamp.
-pub async fn broadcast_tick(state: &Arc<GatewayState>) {
+/// Broadcast a tick event with the current timestamp and memory stats.
+pub async fn broadcast_tick(
+    state: &Arc<GatewayState>,
+    process_memory_bytes: u64,
+    system_available_bytes: u64,
+    system_total_bytes: u64,
+) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -105,7 +130,14 @@ pub async fn broadcast_tick(state: &Arc<GatewayState>) {
     broadcast(
         state,
         "tick",
-        serde_json::json!({ "ts": ts }),
+        serde_json::json!({
+            "ts": ts,
+            "mem": {
+                "process": process_memory_bytes,
+                "available": system_available_bytes,
+                "total": system_total_bytes
+            }
+        }),
         BroadcastOpts {
             drop_if_slow: true,
             ..Default::default()

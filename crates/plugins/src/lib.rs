@@ -1,9 +1,11 @@
-//! Plugin system: discovery, loading, hooks, and API.
-//!
-//! Discovery paths: bundled (extensions/), global (~/.clawdbot/plugins/),
-//! workspace (<workspace>/plugins/), config (plugins.external).
+//! Plugin hooks: bundled hooks, discovery, eligibility, and shell/metadata support.
 
-pub mod loader;
+pub mod bundled;
+pub mod error;
+pub mod hook_discovery;
+pub mod hook_eligibility;
+pub mod hook_metadata;
 pub mod hooks;
-pub mod api;
-pub mod provider;
+pub mod shell_hook;
+
+pub use crate::error::{Error, Result};
